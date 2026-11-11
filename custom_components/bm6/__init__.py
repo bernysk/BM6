@@ -72,6 +72,7 @@ async def async_setup_entry(
             {COMPONENT: EntityComponent(_LOGGER, DOMAIN, hass)}
         )
     hass.data[DOMAIN][entry.entry_id] = entry.data
+    await coordinator.async_refresh()
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(async_reload_entry))
     return True

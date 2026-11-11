@@ -20,6 +20,8 @@ from .const import (
     CHARACTERISTIC_UUID_NOTIFY,
     CHARACTERISTIC_UUID_WRITE,
     CRYPT_KEY,
+    MIN_PLAUSIBLE_VOLTAGE,
+    REALTIME_NOTIFY_TIMEOUT,
     BLEAK_CLIENT_TIMEOUT,
     GATT_DATA_REALTIME,
     GATT_DATA_VERSION,
@@ -162,7 +164,13 @@ class BM6Connector:
         message = self._decrypt(data).hex()
         _LOGGER.debug("Received data from BM6 at %s: %s", self._address, message)
         if message.startswith(GATT_NOTIFY_REALTIME_PREFIX):
-            self._data.RealTime = BM6RealTimeData(message)
+            real_time = BM6RealTimeData(message)
+            if real_time.Voltage < MIN_PLAUSIBLE_VOLTAGE:
+                _LOGGER.debug(
+                    "Ignoring implausible real-time frame from BM6 at %s", self._address
+                )
+                return
+            self._data.RealTime = real_time
             _LOGGER.debug(
                 "Decoded real-time data from BM6 at %s: %s",
                 self._address,
@@ -207,8 +215,9 @@ class BM6Connector:
                     await client.start_notify(
                         CHARACTERISTIC_UUID_NOTIFY, self._notify_callback
                     )
-                    while self._data is None or self._data.RealTime is None:
-                        await asyncio.sleep(0.5)
+                    async with asyncio.timeout(REALTIME_NOTIFY_TIMEOUT):
+                        while self._data is None or self._data.RealTime is None:
+                            await asyncio.sleep(0.5)
                     _LOGGER.debug("Finishing wait for data from BM6 at %s", self._address)
                     await client.stop_notify(CHARACTERISTIC_UUID_NOTIFY)
 

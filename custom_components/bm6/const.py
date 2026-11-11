@@ -10,7 +10,7 @@ VERSION = "1.0.3"
 MIN_REQUIRED_HA_VERSION = "2025.1.1"
 
 COMPONENT = "component"
-PLATFORMS: set[Platform] = {Platform.SENSOR}
+PLATFORMS: set[Platform] = {Platform.SENSOR, Platform.BINARY_SENSOR}
 
 # BM6 Bluetooth Device parameters
 # Characteristic UUIDs for the BM6 device
@@ -104,3 +104,10 @@ KEY_DEVICE_STATE = "device_state"
 KEY_RAPID_ACCELERATION = "rapid_acceleration"
 KEY_RAPID_DECELERATION = "rapid_deceleration"
 KEY_BLUETOOTH_SCANNER = "bluetooth_scanner"
+
+TRANSLATION_KEY_LAST_UPDATE = "last_update"
+TRANSLATION_KEY_REACHABLE = "reachable"
+MISSES_BEFORE_UNREACHABLE = 3
+MAX_BACKOFF_UPDATE_INTERVAL = 300
+MIN_PLAUSIBLE_VOLTAGE = 5.0
+REALTIME_NOTIFY_TIMEOUT = 10
