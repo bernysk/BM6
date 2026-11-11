@@ -6,9 +6,12 @@ import importlib
 import inspect
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
+
+from homeassistant.components.sensor import SensorDeviceClass
 
 from custom_components.bm6 import const, device_trigger
 from custom_components.bm6.battery import (
@@ -17,6 +20,7 @@ from custom_components.bm6.battery import (
     BatteryType,
     BatteryVoltage,
 )
+from .helpers import ADDRESS, entry_data
 
 TRANSLATIONS_DIR = (
     Path(__file__).parent.parent / "custom_components" / "bm6" / "translations"
@@ -33,13 +37,12 @@ EN = load_translation(TRANSLATIONS_DIR / "en.json")
 
 
 def key_paths(obj: Any, prefix: str = "") -> set[str]:
-    """Return every leaf key path of a nested dict."""
+    """Return every key path of a nested dict, including empty branches."""
+    paths: set[str] = {prefix} if prefix else set()
     if isinstance(obj, dict):
-        paths: set[str] = set()
         for key, value in obj.items():
             paths |= key_paths(value, f"{prefix}.{key}" if prefix else key)
-        return paths
-    return {prefix}
+    return paths
 
 
 def get_path(obj: Any, path: str) -> Any:
@@ -127,25 +130,58 @@ def test_entity_translation_keys_exist(platform: str, module_name: str) -> None:
     assert not missing, f"missing translation keys: {missing}"
 
 
-ENUM_SENSOR_OPTIONS = {
-    "state": [
-        state.value for state in BatteryState if state is not BatteryState.Unknown
-    ],
-    "device_state": ["ok", "low_voltage", "charging"],
-}
-
-
-@pytest.mark.parametrize("translation_key", sorted(ENUM_SENSOR_OPTIONS))
-def test_enum_sensor_options_exist(translation_key: str) -> None:
-    """Every ENUM sensor option exists under entity.sensor.<key>.state."""
-    missing = [
-        option
-        for option in ENUM_SENSOR_OPTIONS[translation_key]
-        if not has_path(EN, f"entity.sensor.{translation_key}.state.{option}")
-    ]
-    assert not missing, (
-        f"entity.sensor.{translation_key}.state is missing options: {missing}"
+def enum_sensor_options() -> dict[str, list[str]]:
+    """Return ``{translation_key: options}`` for every ENUM sensor class."""
+    module = importlib.import_module("custom_components.bm6.sensor")
+    coordinator = SimpleNamespace(
+        data=None,
+        device_address=ADDRESS,
+        config_entry=SimpleNamespace(data=entry_data()),
+        last_good_read=None,
     )
+    options: dict[str, list[str]] = {}
+    for _, entity_class in inspect.getmembers(module, inspect.isclass):
+        if entity_class.__module__ != module.__name__:
+            continue
+        translation_key = translation_key_of(entity_class)
+        if translation_key is None:
+            continue
+        entity = entity_class(coordinator)
+        if entity.device_class is not SensorDeviceClass.ENUM:
+            continue
+        options[translation_key] = list(entity.options)
+    return options
+
+
+def test_enum_sensor_options_exist() -> None:
+    """Every discovered ENUM sensor option exists under entity.sensor.<key>.state."""
+    options = enum_sensor_options()
+    assert options, "no ENUM sensors discovered in sensor.py"
+
+    problems = []
+    for translation_key, values in sorted(options.items()):
+        assert values, f"ENUM sensor {translation_key} has no options"
+        missing = [
+            option
+            for option in values
+            if not has_path(EN, f"entity.sensor.{translation_key}.state.{option}")
+        ]
+        if missing:
+            problems.append(f"entity.sensor.{translation_key}.state missing {missing}")
+    assert not problems, "; ".join(problems)
+
+
+def test_enum_sensor_options_match_spec() -> None:
+    """The ENUM option lists are exactly the SPEC ones (no silent narrowing)."""
+    options = enum_sensor_options()
+
+    assert "state" in options and "device_state" in options
+    assert set(options["device_state"]) == {"ok", "low_voltage", "charging"}
+    assert len(options["device_state"]) == 3
+    assert set(options["state"]) == {
+        state.value for state in BatteryState if state is not BatteryState.Unknown
+    }
+    assert BatteryState.Unknown.value not in options["state"]
 
 
 def test_battery_state_values_exist() -> None:

@@ -12,6 +12,8 @@ from types import SimpleNamespace
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.entity import Entity
+from homeassistant.helpers.entity_platform import async_get_platforms
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.bm6.const import (
@@ -108,3 +110,36 @@ def config_entry_unique_ids(hass: HomeAssistant, entry: MockConfigEntry) -> set[
         item.unique_id
         for item in er.async_entries_for_config_entry(registry, entry.entry_id)
     }
+
+
+def fake_coordinator(data, last_good_read=None) -> SimpleNamespace:
+    """Return the coordinator surface the entity classes read."""
+    return SimpleNamespace(
+        data=data,
+        device_address=ADDRESS,
+        config_entry=SimpleNamespace(data=entry_data()),
+        last_good_read=last_good_read,
+    )
+
+
+def entity_object(
+    hass: HomeAssistant, platform: str, entity_id: str
+) -> Entity | None:
+    """Return the live entity object for an entity_id, if it is added."""
+    for entity_platform in async_get_platforms(hass, DOMAIN):
+        if entity_platform.domain != platform:
+            continue
+        if entity_id in entity_platform.entities:
+            return entity_platform.entities[entity_id]
+    return None
+
+
+async def async_enable_entity(
+    hass: HomeAssistant, entry: MockConfigEntry, entity_id: str
+) -> None:
+    """Enable a disabled-by-default entity and reload the entry."""
+    registry = er.async_get(hass)
+    assert registry.async_get(entity_id) is not None, f"{entity_id} is not registered"
+    registry.async_update_entity(entity_id, disabled_by=None)
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()

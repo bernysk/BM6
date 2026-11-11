@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 import logging
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -15,6 +16,7 @@ from homeassistant.util import dt as dt_util
 from custom_components.bm6 import const
 from custom_components.bm6.bm6_connect import BM6DeviceError
 from custom_components.bm6.const import (
+    CONF_UPDATE_INTERVAL,
     KEY_PERCENTAGE,
     KEY_VOLTAGE_CORRECTED,
     PLATFORMS,
@@ -27,8 +29,10 @@ from .helpers import (
     MIN_PLAUSIBLE_VOLTAGE,
     MISSES_BEFORE_UNREACHABLE,
     VOLTAGE_OFFSET,
+    async_enable_entity,
     async_setup_entry,
     entity_id_for,
+    entity_object,
     make_entry,
     make_reading,
 )
@@ -225,12 +229,19 @@ async def test_backoff_and_recovery(hass: HomeAssistant, connector) -> None:
             f"got {coordinator.update_interval}"
         )
 
+    diagnostics = coordinator.get_diagnostic_data()
+    assert diagnostics["update_interval"] == MAX_BACKOFF_UPDATE_INTERVAL
+    assert diagnostics["consecutive_misses"] == 4
+
     succeed(connector, make_reading(voltage=VOLTAGE + 0.2))
     await refresh(hass, coordinator)
 
     assert coordinator.consecutive_misses == 0
     assert coordinator.update_interval == configured
     assert coordinator.reachable is True
+    assert float(entity_state(hass, "sensor", "voltage").state) == pytest.approx(
+        VOLTAGE_CORRECTED + 0.2
+    )
 
 
 async def test_implausible_frame_is_a_miss(hass: HomeAssistant, connector) -> None:
@@ -307,3 +318,176 @@ async def test_diagnostic_data_includes_new_fields(
     assert diagnostics["consecutive_misses"] == 0
     assert diagnostics["reachable"] is True
     assert diagnostics["update_interval"] == CONFIGURED_UPDATE_INTERVAL
+
+
+async def test_device_state_entity_enabled_in_ha(
+    hass: HomeAssistant, connector
+) -> None:
+    """A disabled diagnostic ENUM sensor is enabled, added and reports its state."""
+    entry, coordinator = await setup_ok(
+        hass, connector, make_reading(voltage=VOLTAGE, state=1)
+    )
+
+    assert entity_state(hass, "sensor", "state").state == "idle"
+
+    entity_id = entity_id_for(hass, "sensor", f"bm6_device_state_{ADDRESS}")
+    assert entity_id is not None
+    before = hass.states.get(entity_id)
+    assert before is None or before.state == "unavailable"
+
+    await async_enable_entity(hass, entry, entity_id)
+
+    state = hass.states.get(entity_id)
+    assert state is not None
+    assert state.state == "low_voltage"
+    assert state.attributes["device_class"] == "enum"
+
+    entity = entity_object(hass, "sensor", entity_id)
+    assert entity is not None
+    assert entity.native_value == "low_voltage"
+    assert entity.options == ["ok", "low_voltage", "charging"]
+
+    succeed(connector, make_reading(voltage=VOLTAGE, state=2))
+    await refresh(hass, entry.runtime_data.coordinator)
+    assert hass.states.get(entity_id).state == "charging"
+
+
+async def test_last_good_read_tracks_successes_only(
+    hass: HomeAssistant, connector, freezer
+) -> None:
+    """last_good_read advances on success, stays put on a miss, advances again."""
+    t1 = dt_util.utcnow().replace(microsecond=0)
+    freezer.move_to(t1)
+    _, coordinator = await setup_ok(hass, connector)
+
+    assert coordinator.last_good_read == t1
+    last_update = entity_state(hass, "sensor", "last_update")
+    assert dt_util.parse_datetime(last_update.state) == t1
+
+    t2 = t1 + timedelta(minutes=5)
+    freezer.move_to(t2)
+    miss(connector)
+    await refresh(hass, coordinator)
+
+    assert coordinator.last_good_read == t1
+    last_update = entity_state(hass, "sensor", "last_update")
+    assert dt_util.parse_datetime(last_update.state) == t1
+
+    t3 = t2 + timedelta(minutes=5)
+    freezer.move_to(t3)
+    succeed(connector, make_reading(voltage=VOLTAGE + 0.4))
+    await refresh(hass, coordinator)
+
+    assert coordinator.last_good_read == t3
+    last_update = entity_state(hass, "sensor", "last_update")
+    assert dt_util.parse_datetime(last_update.state) == t3
+    voltage = entity_state(hass, "sensor", "voltage")
+    assert float(voltage.state) == pytest.approx(VOLTAGE_CORRECTED + 0.4)
+
+
+async def test_logging_cycle(hass: HomeAssistant, connector, caplog) -> None:
+    """One warning per outage and one reachable-again info per recovery."""
+    _, coordinator = await setup_ok(hass, connector)
+    miss(connector)
+
+    def bm6_records() -> list[logging.LogRecord]:
+        return [
+            record
+            for record in caplog.records
+            if record.name == "custom_components.bm6.coordinator"
+        ]
+
+    def at_level(level: int) -> list[logging.LogRecord]:
+        return [record for record in bm6_records() if record.levelno == level]
+
+    def miss_debugs() -> list[logging.LogRecord]:
+        return [
+            record
+            for record in at_level(logging.DEBUG)
+            if ADDRESS in record.getMessage()
+        ]
+
+    with caplog.at_level(logging.DEBUG):
+        caplog.clear()
+
+        for _ in range(MISSES_BEFORE_UNREACHABLE):
+            await refresh(hass, coordinator)
+        assert len(at_level(logging.WARNING)) == 1
+        assert at_level(logging.INFO) == []
+        assert len(miss_debugs()) == MISSES_BEFORE_UNREACHABLE
+
+        for _ in range(2):
+            await refresh(hass, coordinator)
+        assert len(at_level(logging.WARNING)) == 1
+        assert len(miss_debugs()) == MISSES_BEFORE_UNREACHABLE + 2
+
+        succeed(connector, make_reading(voltage=VOLTAGE + 0.1))
+        await refresh(hass, coordinator)
+        assert len(at_level(logging.WARNING)) == 1
+        infos = at_level(logging.INFO)
+        assert len(infos) == 1, f"expected one recovery info, got {infos}"
+        assert "reachable again" in infos[0].getMessage().lower()
+
+        await refresh(hass, coordinator)
+        assert len(at_level(logging.INFO)) == 1, "ordinary success logged an info"
+
+        miss(connector)
+        for _ in range(MISSES_BEFORE_UNREACHABLE):
+            await refresh(hass, coordinator)
+        assert len(at_level(logging.WARNING)) == 2
+        assert len(at_level(logging.INFO)) == 1
+        assert at_level(logging.ERROR) == []
+
+
+async def test_backoff_ceiling_is_configured_interval(
+    hass: HomeAssistant, connector
+) -> None:
+    """With a configured interval above 300 s the ceiling is the configured one."""
+    configured = 600
+    connector.return_value.get_data.return_value = make_reading(voltage=VOLTAGE)
+    entry = make_entry(**{CONF_UPDATE_INTERVAL: configured})
+    await async_setup_entry(hass, entry)
+    coordinator = entry.runtime_data.coordinator
+
+    assert coordinator.configured_update_interval == timedelta(seconds=configured)
+    assert coordinator.update_interval == timedelta(seconds=configured)
+
+    miss(connector)
+    for misses in range(1, 4):
+        await refresh(hass, coordinator)
+        assert coordinator.consecutive_misses == misses
+        assert coordinator.update_interval == timedelta(seconds=configured)
+
+
+async def test_exactly_min_plausible_voltage_is_accepted(
+    hass: HomeAssistant, connector
+) -> None:
+    """A frame at exactly MIN_PLAUSIBLE_VOLTAGE is a good reading."""
+    _, coordinator = await setup_ok(
+        hass, connector, make_reading(voltage=MIN_PLAUSIBLE_VOLTAGE)
+    )
+
+    assert coordinator.consecutive_misses == 0
+    assert coordinator.last_update_success is True
+    assert coordinator.data[KEY_VOLTAGE_CORRECTED] == pytest.approx(
+        MIN_PLAUSIBLE_VOLTAGE + VOLTAGE_OFFSET
+    )
+
+
+@pytest.mark.parametrize(
+    "bad_reading",
+    [None, SimpleNamespace(RealTime=None, Advertisement=None)],
+    ids=["none", "no-realtime"],
+)
+async def test_empty_reads_are_misses(hass: HomeAssistant, connector, bad_reading) -> None:
+    """A None read or a reading without RealTime counts as a miss."""
+    _, coordinator = await setup_ok(hass, connector)
+    good_data = dict(coordinator.data)
+
+    succeed(connector, bad_reading)
+    await refresh(hass, coordinator)
+
+    assert coordinator.data == good_data
+    assert coordinator.consecutive_misses == 1
+    assert coordinator.last_update_success is True
+    assert coordinator.reachable is True
