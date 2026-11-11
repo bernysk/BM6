@@ -121,7 +121,7 @@ class BM6SensorEntity(CoordinatorEntity[BM6DataUpdateCoordinator], RestoreSensor
     def native_unit_of_measurement(self):
         if self.coordinator.data is None and self._restored_data is not None:
             return self._restored_data.native_unit_of_measurement
-        return self._attr_native_unit_of_measurement
+        return super().native_unit_of_measurement
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -385,6 +385,7 @@ class BM6RapidDecelerationSensor(BM6SensorEntity):
         return self._value(KEY_RAPID_DECELERATION)
 
 
+@final
 class BM6LastUpdateSensor(BM6SensorEntity):
     """Time of the last successful reading."""
 
