@@ -116,7 +116,11 @@ You may do these yourself, without workers:
 Orca setup script for new worktrees (Project Settings → Worktree hooks → Setup script). If `.venv/` is missing in your worktree, run it yourself from the worktree root:
 
 ```bash
-python3 -m venv .venv && .venv/bin/pip install pytest-homeassistant-custom-component
+python3 -m venv .venv && .venv/bin/pip install pytest-homeassistant-custom-component pycryptodome aiofiles && .venv/bin/pip install $(.venv/bin/python -c "import json,pathlib,homeassistant.components as c;p=pathlib.Path(c.__path__[0]);print(' '.join(r for n in ('bluetooth','usb') for r in json.load(open(p/n/'manifest.json'))['requirements']))")
 ```
+
+- `pytest-homeassistant-custom-component` pins Home Assistant and pytest.
+- `pycryptodome` (`Crypto`) and `aiofiles` are imported by the integration.
+- The second `pip install` adds the requirements of HA's `bluetooth` and `usb` components (this integration depends on `bluetooth_adapters`), read from the installed HA so the versions always match it.
 
 Machine prerequisite (once, needs sudo): `sudo apt install -y python3-venv`. Without it `python3 -m venv` fails with "ensurepip is not available".
