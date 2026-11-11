@@ -5,10 +5,11 @@ This module contains the BM6DataUpdateCoordinator class, which manages fetching 
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
 from homeassistant.core import HomeAssistant
+from homeassistant.util import dt as dt_util
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .utils import convert_temperature
@@ -17,6 +18,9 @@ from .bm6_connect import BM6Connector, BM6Data, BM6DeviceError
 from .const import (
     CONF_TEMPERATURE_UNIT,
     DOMAIN,
+    MISSES_BEFORE_UNREACHABLE,
+    MAX_BACKOFF_UPDATE_INTERVAL,
+    MIN_PLAUSIBLE_VOLTAGE,
     CONF_DEVICE_ADDRESS,
     CONF_UPDATE_INTERVAL,
     CONF_VOLTAGE_OFFSET,
@@ -56,15 +60,19 @@ class BM6DataUpdateCoordinator(DataUpdateCoordinator):
 
     def __init__(self, hass: HomeAssistant, config_entry: BM6ConfigEntry) -> None:
         """Initialize the coordinator."""
-        self.hass = hass
-        self.config_entry = config_entry
         self.device_address = config_entry.data[CONF_DEVICE_ADDRESS]
         self._battery = Battery(config_entry.data)
+        self.last_good_read: datetime | None = None
+        self.consecutive_misses = 0
+        self.configured_update_interval = timedelta(
+            seconds=config_entry.data[CONF_UPDATE_INTERVAL]
+        )
         super().__init__(
             hass,
             _LOGGER,
             name=DOMAIN,
-            update_interval=timedelta(seconds=config_entry.data[CONF_UPDATE_INTERVAL]),
+            config_entry=config_entry,
+            update_interval=self.configured_update_interval,
         )
 
     async def _async_update_data(self) -> dict:
@@ -74,6 +82,10 @@ class BM6DataUpdateCoordinator(DataUpdateCoordinator):
                 hass=self.hass, address=self.device_address
             )
             data: BM6Data = await connector.get_data()
+            if data is None or data.RealTime is None:
+                raise BM6DeviceError("No real-time data")
+            if data.RealTime.Voltage < MIN_PLAUSIBLE_VOLTAGE:
+                raise BM6DeviceError(f"Implausible voltage: {data.RealTime.Voltage} V")
             voltage_corrected = (
                 data.RealTime.Voltage + self.config_entry.data[CONF_VOLTAGE_OFFSET]
             )
@@ -83,7 +95,7 @@ class BM6DataUpdateCoordinator(DataUpdateCoordinator):
                 + self.config_entry.data[CONF_TEMPERATURE_OFFSET]
             )
             self._battery.update(data.RealTime, voltage_corrected)
-            return {
+            result = {
                 KEY_VOLTAGE_DEVICE: data.RealTime.Voltage,
                 KEY_VOLTAGE_CORRECTED: voltage_corrected,
                 KEY_TEMPERATURE_DEVICE: data.RealTime.Temperature,
@@ -105,16 +117,41 @@ class BM6DataUpdateCoordinator(DataUpdateCoordinator):
                 KEY_DEVICE_STATE: data.RealTime.State,
                 KEY_RAPID_ACCELERATION: data.RealTime.RapidAcceleration,
                 KEY_RAPID_DECELERATION: data.RealTime.RapidDeceleration,
-                KEY_BLUETOOTH_SCANNER: data.Advertisement.Scanner,
+                KEY_BLUETOOTH_SCANNER: (
+                    data.Advertisement.Scanner if data.Advertisement else None
+                ),
             }
-        except BM6DeviceError as e:
-            _LOGGER.error("BM6 device error at %s: %s", self.device_address, e)
-            raise UpdateFailed(f"BM6 device error: {e}") from e
-        except Exception as e:
-            _LOGGER.error(
-                "Unexpected error while reading BM6 at %s: %s", self.device_address, e
+            was_unreachable = self.consecutive_misses >= MISSES_BEFORE_UNREACHABLE
+            self.last_good_read = dt_util.utcnow()
+            self.consecutive_misses = 0
+            self.update_interval = self.configured_update_interval
+            if was_unreachable:
+                _LOGGER.info("BM6 at %s is reachable again", self.device_address)
+            return result
+        except Exception as err:
+            self.consecutive_misses += 1
+            _LOGGER.debug(
+                "BM6 at %s read missed (%s): %s",
+                self.device_address, self.consecutive_misses, err,
             )
-            raise UpdateFailed(f"Unexpected error: {e}") from e
+            if self.consecutive_misses == MISSES_BEFORE_UNREACHABLE:
+                _LOGGER.warning("BM6 at %s is unreachable", self.device_address)
+            configured = self.configured_update_interval.total_seconds()
+            ceiling = max(configured, MAX_BACKOFF_UPDATE_INTERVAL)
+            # Bound the exponent too, so prolonged outages cannot overflow.
+            interval = min(configured * 2 ** min(self.consecutive_misses, 1023), ceiling)
+            self.update_interval = timedelta(seconds=interval)
+            if self.data is not None:
+                return self.data
+            raise UpdateFailed(f"BM6 read failed: {err}") from err
+
+    @property
+    def reachable(self) -> bool:
+        """Whether a good reading exists without too many subsequent misses."""
+        return (
+            self.last_good_read is not None
+            and self.consecutive_misses < MISSES_BEFORE_UNREACHABLE
+        )
 
     def get_diagnostic_data(self) -> dict:
         """Return diagnostic data for the BM6 device."""
@@ -124,6 +161,9 @@ class BM6DataUpdateCoordinator(DataUpdateCoordinator):
             "data": self.data,
             "last_update_success": self.last_update_success,
             "last_exception": self.last_exception,
-            "update_interval": self.update_interval.seconds,
+            "update_interval": self.update_interval.total_seconds(),
             "microsecond": self._microsecond,
+            "last_good_read": self.last_good_read,
+            "consecutive_misses": self.consecutive_misses,
+            "reachable": self.reachable,
         }
