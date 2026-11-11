@@ -49,7 +49,7 @@
     "options": {
         "step": {
             "init": {
-                "title": "Rekonfigurace monitoru BM6",
+                "title": "Změna konfigurace monitoru BM6",
                 "description": "Základní parametry konfigurace zařízení.",
                 "data": {
                     "state_algorithm": "Algoritmus výpočtu baterie",
@@ -129,7 +129,7 @@
                     "state_algorithm": {
                         "name": "Algoritmus výpočtu baterie",
                         "state": {
-                            "by_device": "Nahlášeno zařízením BM6",
+                            "by_device": "Určeno zařízením BM6",
                             "soc_sod": "Stav nabití/vybití (SOC/SOD)",
                             "cvr_dvr": "Rozsah nabíjecího/vybíjecího napětí (CVR/DVR)"
                         }
@@ -216,7 +216,7 @@
         },
         "battery_type": {
             "options": {
-                "fla": "Zaplavené olověné baterie (FLA)",
+                "fla": "Zaplavená olověná baterie (FLA)",
                 "agm": "Absorpční skleněná rohož (AGM)",
                 "gel": "Gelový článek (GEL)",
                 "nicd": "Nikl-kadmiová (NiCd)",
@@ -229,7 +229,7 @@
         },
         "battery_state_algorithm": {
             "options": {
-                "by_device": "Nahlášeno zařízením BM6",
+                "by_device": "Určeno zařízením BM6",
                 "soc_sod": "Stav nabití/vybití (SOC/SOD)",
                 "cvr_dvr": "Rozsah nabíjecího/vybíjecího napětí (CVR/DVR)"
             }
