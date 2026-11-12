@@ -262,3 +262,65 @@ as this outage's unreachable warning: no second warning when the misses reach
 `MISSES_BEFORE_UNREACHABLE`. After a later success, the "reachable again" info
 log applies as before. Don't call private HA methods (`_async_refresh` etc.).
 Entities behave as before (sensors unavailable unless restored, Reachable off).
+
+---
+
+# Round 3: catch up with the forks
+
+Everything above still holds (unique_ids, SPEC 8 call order and logging, etc.).
+
+## 11. Read retries (`bm6_connect.py`, `const.py`; Mpercy-Git)
+
+New constants (imported by name into `bm6_connect`, so tests can patch them there):
+
+```python
+CONNECT_SETTLE_TIME = 1.0      # s, wait after connecting, before subscribing
+REALTIME_READ_ATTEMPTS = 3     # realtime requests per scanner
+REALTIME_ANSWER_TIMEOUT = 3    # s, wait for the answer to one request
+```
+
+Per scanner, after `establish_connection`:
+
+1. `await asyncio.sleep(CONNECT_SETTLE_TIME)`, then `start_notify` (still before any write).
+2. Up to `REALTIME_READ_ATTEMPTS` times: write the realtime request, then wait up
+   to `REALTIME_ANSWER_TIMEOUT` for an answer.
+   - A plausible frame (voltage >= `MIN_PLAUSIBLE_VOLTAGE`) ends the read: return it.
+   - An **empty answer** (a realtime frame below the floor, including all-zero)
+     or **no answer** within `REALTIME_ANSWER_TIMEOUT` -> ask again at once.
+3. All attempts sit inside the existing `REALTIME_NOTIFY_TIMEOUT` (per scanner)
+   and `BM6_READ_TIMEOUT` (whole read).
+4. When every attempt was empty or missing, this scanner fails with a
+   `BM6DeviceError` whose message says how many requests were sent and, if any
+   answer came, the last answer's hex, e.g.
+   `BM6 at <addr> answered without a reading 3 times, last answer was d15507...`
+   or `BM6 at <addr> did not answer 3 requests`. Then the next scanner is tried
+   (SPEC 8); the final error names each scanner's error.
+5. Logging stays at debug.
+
+## 12. Battery (`battery.py`; Mpercy-Git)
+
+- `battery_voltage_ranges[(BatteryType.LiFePO4, BatteryVoltage.V6)]` =
+  dvr 6.0-6.75, cvr 7.3-7.5, soc 6.5-6.75, sod 6.0-6.5.
+- `_update_state`: when the voltage is `None`, state = `BatteryState.Unknown` and return.
+- `Battery.update` (non-device algorithm) updates the state **before** the percent
+  (the percent reads the state, e.g. Idle -> 100).
+- `_bm6_status_to_battery_state`: a device state code that isn't a
+  `BM6RealTimeState` (e.g. 3, 99, None) -> `BatteryState.Unknown`, no exception.
+
+## 13. Config flow and brand (`config_flow.py`, `brand/`; Zwer2k, townsmcp)
+
+- `_is_valid_device(service_info) -> bool` is True exactly when one of the
+  manifest's `bluetooth` matchers (read from manifest.json as today, not
+  hard-coded) matches:
+  - `manufacturer_id` in `service_info.manufacturer_data` and that data starts
+    with `bytes(manufacturer_data_start)`; or
+  - the matcher's `service_uuid` is in `service_info.service_uuids` (case-insensitive).
+  Fix the current `service_data_uuid` lookup, which never matches.
+- `_get_devices` offers only matching, not-yet-configured devices. Per-device
+  logs at debug; at most one debug summary; nothing at info.
+- `async_step_bluetooth` is unchanged (HA only calls it for manifest matches).
+- `custom_components/bm6/brand/icon.png` and `icon@2x.png` are byte-identical
+  copies of `images/icon.png` and `images/icon@2x.png` (the forks' brand icons
+  are these same files).
+- manifest.json: no change. HA manifests have no categories field (hassfest
+  rejects `categories`); `integration_type: device` stays.
