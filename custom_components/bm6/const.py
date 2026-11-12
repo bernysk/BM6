@@ -33,6 +33,9 @@ CRYPT_KEY = bytearray(
 )
 # Connection retries and bounded read / cleanup windows (seconds).
 CONNECT_MAX_ATTEMPTS = 3
+CONNECT_SETTLE_TIME = 1.0
+REALTIME_READ_ATTEMPTS = 3
+REALTIME_ANSWER_TIMEOUT = 3
 BM6_READ_TIMEOUT = 120
 BM6_CLEANUP_TIMEOUT = 5
 
