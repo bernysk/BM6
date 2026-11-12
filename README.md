@@ -1,28 +1,40 @@
 # Battery Monitor BM6 Integration
-![GitHub License](https://img.shields.io/github/license/Rafciq/BM6)
-![GitHub Release](https://img.shields.io/github/v/release/Rafciq/BM6)
-![GitHub Release Date](https://img.shields.io/github/release-date/Rafciq/BM6)
-![GitHub Issues or Pull Requests](https://img.shields.io/github/issues/Rafciq/BM6)
-[![hacs_badge](https://img.shields.io/badge/HACS-Default-orange.svg?style=flat-square)](https://github.com/hacs)
-![GitHub Repo stars](https://img.shields.io/github/stars/Rafciq/BM6)
+![GitHub License](https://img.shields.io/github/license/bernysk/BM6)
+![GitHub Release](https://img.shields.io/github/v/release/bernysk/BM6)
+![GitHub Release Date](https://img.shields.io/github/release-date/bernysk/BM6)
+![GitHub Issues or Pull Requests](https://img.shields.io/github/issues/bernysk/BM6)
+[![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg?style=flat-square)](https://github.com/hacs)
+![GitHub Repo stars](https://img.shields.io/github/stars/bernysk/BM6)
 
 This custom component for [Home Assistant](https://www.home-assistant.io) to reads BLE Car Battery Monitor BM6.
+
+This is a fork of [Rafciq/BM6](https://github.com/Rafciq/BM6) (MIT). Thanks to [Mpercy-Git/BM6](https://github.com/Mpercy-Git/BM6), [Zwer2k/BM6](https://github.com/Zwer2k/BM6) and [townsmcp/BM6](https://github.com/townsmcp/BM6), whose work this fork builds on.
 
 ## About
 <table width="100%" style="border: none;">
     <tr>
-        <td><img src="https://github.com/Rafciq/BM6/blob/59d07c0c791f349ccf2342f3340860cabc7606dc/images/icon.png" alt="Icon"></td>
+        <td><img src="https://github.com/bernysk/BM6/blob/main/images/icon.png?raw=true" alt="Icon"></td>
         <td valign="top">This is an integration that allows you to observe BM6 parameters on the Home Assistant platform. BM6 is monitored via a Bluetooth gateway, and its parameters such as temperature, voltage, percent, state are saved as entities by the HA platform.<br><br>
         This integration allows you to add any number of such devices.
-        <td><img src="https://github.com/Rafciq/BM6/blob/59d07c0c791f349ccf2342f3340860cabc7606dc/images/bm6_device.png" alt="BM6" width="70%" height="70%"></td>
+        <td><img src="https://github.com/bernysk/BM6/blob/main/images/bm6_device.png?raw=true" alt="BM6" width="70%" height="70%"></td>
     </tr>
 </table>
 
 **:warning: Warning! The author is not responsible for any damages related to the use of this integration. You use this integration at your own risk and responsibility.**
 
+## What's new in 1.1.0
+- Sensors keep the last known value while the BM6 is out of range, instead of showing "unavailable". The update interval backs off while the device is unreachable and returns to normal after a good read.
+- Values are restored after a Home Assistant restart.
+- New sensors: "Last update" (time of the last good read) and "Reachable" (connectivity; off after 3 missed reads).
+- Read retries: every Bluetooth scanner/proxy is tried, strongest signal first. After connecting it waits 1 s and asks up to 3 times when the answer is empty.
+
 ## Installation
 Before installing this integration, you must have [HACS](https://hacs.xyz/) integration installed first. 
-Select 'HACS' (usual on the left bar), add then choose from menu 'Custom repositories' (on top at right). Put the address https://github.com/Rafciq/BM6 at first and select repository type 'Integration' choose 'ADD'. Now you can add BM6 devices.
+Select 'HACS' (usual on the left bar), add then choose from menu 'Custom repositories' (on top at right). Put the address https://github.com/bernysk/BM6 at first and select repository type 'Integration' choose 'ADD'. Now you can add BM6 devices.
+
+This fork is not in the HACS default store, so you add it as a custom repository as above.
+### Testing a beta
+In HACS, open this repository and enable "Show beta versions", then download the pre-release (e.g. v1.1.0-beta.3).
 ## Configuration
 Go to "Settings', next 'Devices & services', select 'Integration' and use 'ADD INTEGRATION'
 
@@ -100,7 +112,7 @@ The integration has been automatically translated into several languages:
 
 ![Image](https://flagcdn.com/w20/al.png) Albanian, ![Image](https://flagcdn.com/w20/hr.png) Croatian, ![Image](https://flagcdn.com/w20/cz.png) Czech, ![Image](https://flagcdn.com/w20/dk.png) Danish, ![Image](https://flagcdn.com/w20/nl.png) Dutch, ![Image](https://flagcdn.com/w20/us.png) English, ![Image](https://flagcdn.com/w20/fi.png) Finnish, ![Image](https://flagcdn.com/w20/fr.png) French, ![Image](https://flagcdn.com/w20/de.png) German, ![Image](https://flagcdn.com/w20/er.png) Greek, ![Image](https://flagcdn.com/w20/hu.png) Hungarian, ![Image](https://flagcdn.com/w20/is.png) Icelandic, ![Image](https://flagcdn.com/w20/ga.png) Irish, ![Image](https://flagcdn.com/w20/it.png) Italian, ![Image](https://flagcdn.com/w20/lv.png) Latvian, ![Image](https://flagcdn.com/w20/lt.png) Lithuanian, ![Image](https://flagcdn.com/w20/mk.png) Macedonian, ![Image](https://flagcdn.com/w20/mt.png) Maltese, ![Image](https://flagcdn.com/w20/no.png) Norwegian, ![Image](https://flagcdn.com/w20/pl.png) Polish, ![Image](https://flagcdn.com/w20/pt.png) Portuguese, ![Image](https://flagcdn.com/w20/ro.png) Romanian, ![Image](https://flagcdn.com/w20/rs.png) Serbian, ![Image](https://flagcdn.com/w20/sk.png) Slovak, ![Image](https://flagcdn.com/w20/sl.png) Slovenian, ![Image](https://flagcdn.com/w20/es.png) Spanish, ![Image](https://flagcdn.com/w20/sv.png) Swedish, ![Image](https://flagcdn.com/w20/tr.png) Turkish, ![Image](https://flagcdn.com/w20/ua.png) Ukrainian
 
-If you would like to correct any of them, please create an [issue](https://github.com/Rafciq/BM6/issues).
+If you would like to correct any of them, please create an [issue](https://github.com/bernysk/BM6/issues).
 # Thanks
 This project is inspired and based on the hard work of other people and their publications:
 - [Reverse Engineering the BM6 BLE Battery Monitor](https://www.tarball.ca/posts/reverse-engineering-the-bm6-ble-battery-monitor/)
