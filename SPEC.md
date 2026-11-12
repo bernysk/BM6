@@ -246,9 +246,9 @@ with `CRYPT_KEY` and a zero IV; a decrypted real-time frame is hex starting with
 - `"requirements"`: `pycryptodome` and `bleak-retry-connector` with lower bounds
   every supported HA (`MIN_REQUIRED_HA_VERSION` up to current) already satisfies;
   no `==` pins that could clash with HA's package constraints.
-- `"bluetooth"`: keep the four `manufacturer_id` matchers and the
-  `0000fff0-...` service_uuid matcher; remove the `00001800`, `00001801` and
-  `0000180a` service_uuid matchers.
+- `"bluetooth"`: exactly the four `manufacturer_id` matchers and the
+  `0000fff0-...` service_uuid matcher (as Mpercy-Git). Every other service_uuid
+  matcher goes: `00001800`, `00001801`, `0000180a`, and the generic `0000fee0`.
 - `"documentation": "https://github.com/bernysk/BM6"`,
   `"issue_tracker": "https://github.com/bernysk/BM6/issues"`,
   `"codeowners": ["@bernysk"]`.
