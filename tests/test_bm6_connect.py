@@ -39,6 +39,9 @@ ESTABLISH = "custom_components.bm6.bm6_connect.establish_connection"
 READ_TIMEOUT = "custom_components.bm6.bm6_connect.BM6_READ_TIMEOUT"
 NOTIFY_TIMEOUT = "custom_components.bm6.bm6_connect.REALTIME_NOTIFY_TIMEOUT"
 CLEANUP_TIMEOUT = "custom_components.bm6.bm6_connect.BM6_CLEANUP_TIMEOUT"
+SETTLE_TIME = "custom_components.bm6.bm6_connect.CONNECT_SETTLE_TIME"
+ANSWER_TIMEOUT = "custom_components.bm6.bm6_connect.REALTIME_ANSWER_TIMEOUT"
+READ_ATTEMPTS = "custom_components.bm6.bm6_connect.REALTIME_READ_ATTEMPTS"
 
 ZERO_IV = bytes(16)
 
@@ -113,6 +116,8 @@ class FakeClient:
     def __init__(
         self,
         *frames: bytes,
+        answer_frames: list[bytes | None] | None = None,
+        log: list[tuple[str, float]] | None = None,
         delayed_frames: tuple[tuple[float, bytes], ...] = (),
         fail_start_notify: bool = False,
         fail_write: bool = False,
@@ -124,6 +129,8 @@ class FakeClient:
         self.calls: list[tuple] = []
         self.writes: list[tuple[str, bytes, bool]] = []
         self.frames = list(frames)
+        self.answer_frames = None if answer_frames is None else list(answer_frames)
+        self.log = log
         self.delayed_frames = list(delayed_frames)
         self.notify_callback = None
         self.subscribed = False
@@ -138,6 +145,8 @@ class FakeClient:
 
     async def start_notify(self, uuid, callback) -> None:
         self.calls.append(("start_notify", uuid))
+        if self.log is not None:
+            self.log.append(("start_notify", time.monotonic()))
         if self._fail_start_notify:
             raise RuntimeError("start_notify failed")
         self.subscribed = True
@@ -146,9 +155,18 @@ class FakeClient:
     async def write_gatt_char(self, uuid, data, response: bool = False) -> None:
         self.calls.append(("write_gatt_char", uuid))
         self.writes.append((uuid, bytes(data), response))
+        if self.log is not None:
+            self.log.append(("write_gatt_char", time.monotonic()))
         if self._fail_write:
             raise RuntimeError("write failed")
         if not self.subscribed:
+            return
+        if self.answer_frames is not None:
+            index = len(self.writes) - 1
+            if index < len(self.answer_frames):
+                frame = self.answer_frames[index]
+                if frame is not None:
+                    await self._deliver(frame)
             return
         for frame in self.frames:
             await self._deliver(frame)
@@ -156,6 +174,11 @@ class FakeClient:
             self._background.append(
                 asyncio.get_running_loop().create_task(self._deliver_later(delay, frame))
             )
+
+    async def cancel_background(self) -> None:
+        for task in self._background:
+            task.cancel()
+        await asyncio.gather(*self._background, return_exceptions=True)
 
     async def _deliver_later(self, delay: float, frame: bytes) -> None:
         await asyncio.sleep(delay)
@@ -232,15 +255,25 @@ def test_spec_default_constants() -> None:
         "VERSION": "1.1.0",
         "BM6_READ_TIMEOUT": 120,
         "CONNECT_MAX_ATTEMPTS": 3,
+        "CONNECT_SETTLE_TIME": 1.0,
+        "REALTIME_READ_ATTEMPTS": 3,
+        "REALTIME_ANSWER_TIMEOUT": 3,
         "REALTIME_NOTIFY_TIMEOUT": 10,
         "BM6_CLEANUP_TIMEOUT": 5,
     }
     for name, value in expected.items():
         assert getattr(const, name, None) == value, f"const.{name}"
 
-    # The connector reads these four through its module globals.
-    for name in ("BM6_READ_TIMEOUT", "CONNECT_MAX_ATTEMPTS",
-                 "REALTIME_NOTIFY_TIMEOUT", "BM6_CLEANUP_TIMEOUT"):
+    # The connector reads these through its module globals, so tests patch them there.
+    for name in (
+        "BM6_READ_TIMEOUT",
+        "CONNECT_MAX_ATTEMPTS",
+        "CONNECT_SETTLE_TIME",
+        "REALTIME_READ_ATTEMPTS",
+        "REALTIME_ANSWER_TIMEOUT",
+        "REALTIME_NOTIFY_TIMEOUT",
+        "BM6_CLEANUP_TIMEOUT",
+    ):
         assert getattr(bm6_connect, name, None) == expected[name], f"bm6_connect.{name}"
 
 
@@ -260,7 +293,7 @@ async def test_falls_back_to_the_weaker_scanner() -> None:
     weak = make_scanner("weak", -80)
     client = FakeClient(realtime_frame(voltage=13.2))
 
-    with patch(ESTABLISH) as establish_mock:
+    with patch(SETTLE_TIME, 0), patch(ESTABLISH) as establish_mock:
         establish_mock.side_effect = establish(
             {strong.ble_device: RuntimeError("cannot connect"), weak.ble_device: client}
         )
@@ -306,7 +339,7 @@ async def test_subscribe_happens_before_write() -> None:
     scanner = make_scanner("hci0", -50)
     client = FakeClient(realtime_frame())
 
-    with patch(ESTABLISH) as establish_mock:
+    with patch(SETTLE_TIME, 0), patch(ESTABLISH) as establish_mock:
         establish_mock.side_effect = establish({scanner.ble_device: client})
         data, lookup_mock = await read([scanner])
 
@@ -315,6 +348,7 @@ async def test_subscribe_happens_before_write() -> None:
     assert "start_notify" in names
     assert "write_gatt_char" in names
     assert names.index("start_notify") < names.index("write_gatt_char")
+    assert len(client.writes) == 1
     assert client.calls[names.index("start_notify")][1] == CHARACTERISTIC_UUID_NOTIFY
     assert client.calls[names.index("write_gatt_char")][1] == CHARACTERISTIC_UUID_WRITE
     assert_valid_request(client)
@@ -386,7 +420,7 @@ async def test_overall_deadline_cleans_up_connected_client() -> None:
     client = FakeClient()
 
     started = time.monotonic()
-    with patch(READ_TIMEOUT, 0.2), patch(NOTIFY_TIMEOUT, 10):
+    with patch(READ_TIMEOUT, 0.2), patch(NOTIFY_TIMEOUT, 10), patch(SETTLE_TIME, 0):
         with patch(ESTABLISH) as establish_mock:
             establish_mock.side_effect = establish({scanner.ble_device: client})
             try:
@@ -410,7 +444,7 @@ async def test_cleanup_after_success() -> None:
     scanner = make_scanner("hci0", -50)
     client = FakeClient(realtime_frame())
 
-    with patch(ESTABLISH) as establish_mock:
+    with patch(SETTLE_TIME, 0), patch(ESTABLISH) as establish_mock:
         establish_mock.side_effect = establish({scanner.ble_device: client})
         await read([scanner])
 
@@ -425,7 +459,7 @@ async def test_cleanup_after_failure_during_read() -> None:
     scanner = make_scanner("hci0", -50)
     client = FakeClient(fail_write=True)
 
-    with patch(ESTABLISH) as establish_mock:
+    with patch(SETTLE_TIME, 0), patch(ESTABLISH) as establish_mock:
         establish_mock.side_effect = establish({scanner.ble_device: client})
         with pytest.raises(BM6DeviceError):
             await read([scanner])
@@ -451,7 +485,7 @@ async def test_cleanup_errors_do_not_escape(
         fail_disconnect=fail_disconnect,
     )
 
-    with patch(ESTABLISH) as establish_mock:
+    with patch(SETTLE_TIME, 0), patch(ESTABLISH) as establish_mock:
         establish_mock.side_effect = establish({scanner.ble_device: client})
         data, _ = await read([scanner])
 
@@ -482,7 +516,7 @@ async def test_cleanup_is_bounded(mode: str, hanging: str) -> None:
             )
 
     started = time.monotonic()
-    with patch(CLEANUP_TIMEOUT, 0.1):
+    with patch(CLEANUP_TIMEOUT, 0.1), patch(SETTLE_TIME, 0):
         with patch(ESTABLISH) as establish_mock:
             establish_mock.side_effect = establish({scanner.ble_device: client})
             if mode == "success":
@@ -507,7 +541,7 @@ async def test_implausible_frame_falls_back_to_next_scanner() -> None:
     empty_client = FakeClient(realtime_frame(voltage=0.0))
     real_client = FakeClient(realtime_frame(voltage=13.2))
 
-    with patch(NOTIFY_TIMEOUT, 0.1):
+    with patch(NOTIFY_TIMEOUT, 0.5), patch(ANSWER_TIMEOUT, 0.1), patch(SETTLE_TIME, 0):
         with patch(ESTABLISH) as establish_mock:
             establish_mock.side_effect = establish(
                 {empty.ble_device: empty_client, real.ble_device: real_client}
@@ -521,15 +555,17 @@ async def test_implausible_frame_falls_back_to_next_scanner() -> None:
     assert establish_mock.call_count == 2
 
 
-async def test_implausible_frame_is_ignored_on_the_same_scanner() -> None:
-    """A 0 V frame is skipped while the same connection waits for a real frame."""
+async def test_empty_answer_then_real_answer_succeeds_on_same_scanner() -> None:
+    """An empty answer triggers one more request on the same connection."""
     scanner = make_scanner("hci0", -50)
     client = FakeClient(
-        realtime_frame(voltage=0.0),
-        delayed_frames=((0.05, realtime_frame(voltage=13.2)),),
+        answer_frames=[
+            realtime_frame(voltage=0.0),
+            realtime_frame(voltage=13.2),
+        ]
     )
 
-    with patch(NOTIFY_TIMEOUT, 0.5):
+    with patch(NOTIFY_TIMEOUT, 1.0), patch(ANSWER_TIMEOUT, 0.2), patch(SETTLE_TIME, 0):
         with patch(ESTABLISH) as establish_mock:
             establish_mock.side_effect = establish({scanner.ble_device: client})
             data, _ = await read([scanner])
@@ -538,6 +574,108 @@ async def test_implausible_frame_is_ignored_on_the_same_scanner() -> None:
     assert data.Advertisement.Scanner == "hci0"
     assert establish_mock.call_count == 1
     assert call_names(client).count("start_notify") == 1
+    assert len(client.writes) == 2
+
+
+async def test_only_empty_answers_report_the_last_answer() -> None:
+    """Every attempt empty fails with the request count and the last hex answer."""
+    scanner = make_scanner("hci0", -50)
+    answers = [
+        realtime_frame(voltage=0.0),
+        realtime_frame(voltage=1.0),
+        realtime_frame(voltage=2.0),
+    ]
+    client = FakeClient(answer_frames=answers)
+
+    with patch(NOTIFY_TIMEOUT, 1.0), patch(ANSWER_TIMEOUT, 0.2), patch(
+        SETTLE_TIME, 0
+    ), patch(READ_ATTEMPTS, 3):
+        with patch(ESTABLISH) as establish_mock:
+            establish_mock.side_effect = establish({scanner.ble_device: client})
+            with pytest.raises(BM6DeviceError) as excinfo:
+                await read([scanner])
+
+    assert establish_mock.call_count == 1
+    assert len(client.writes) == 3
+    message = str(excinfo.value).lower()
+    assert "answered without a reading" in message
+    assert answers[-1].hex() in message
+    assert "3" in message
+
+
+async def test_no_answer_names_the_request_count() -> None:
+    """A silent device fails after REALTIME_READ_ATTEMPTS requests."""
+    scanner = make_scanner("hci0", -50)
+    client = FakeClient()
+
+    with patch(NOTIFY_TIMEOUT, 1.0), patch(ANSWER_TIMEOUT, 0.05), patch(
+        SETTLE_TIME, 0
+    ), patch(READ_ATTEMPTS, 3):
+        with patch(ESTABLISH) as establish_mock:
+            establish_mock.side_effect = establish({scanner.ble_device: client})
+            with pytest.raises(BM6DeviceError) as excinfo:
+                await read([scanner])
+
+    assert establish_mock.call_count == 1
+    assert len(client.writes) == 3
+    message = str(excinfo.value).lower()
+    assert "3" in message
+    assert "answer" in message
+    assert "request" in message
+
+
+async def test_settle_happens_before_subscribe_and_subscribe_before_writes() -> None:
+    """The settle sleep runs before start_notify, which precedes every write."""
+    scanner = make_scanner("hci0", -50)
+    log: list[tuple[str, float]] = []
+    client = FakeClient(
+        answer_frames=[
+            realtime_frame(voltage=0.0),
+            realtime_frame(voltage=13.2),
+        ],
+        log=log,
+    )
+
+    async def establish_timed(client_cls, ble_device, address, **kwargs):
+        log.append(("establish_connection", time.monotonic()))
+        return client
+
+    with patch(SETTLE_TIME, 0.1), patch(ANSWER_TIMEOUT, 0.5):
+        with patch(ESTABLISH, side_effect=establish_timed) as establish_mock:
+            data, _ = await read([scanner])
+
+    assert establish_mock.call_count == 1
+    assert data.RealTime.Voltage == pytest.approx(13.2)
+    established = next(at for name, at in log if name == "establish_connection")
+    subscribed = next(at for name, at in log if name == "start_notify")
+    writes = [at for name, at in log if name == "write_gatt_char"]
+    assert subscribed - established >= 0.05
+    assert len(writes) == 2
+    assert all(at > subscribed for at in writes)
+
+
+async def test_attempts_stay_within_the_notify_timeout() -> None:
+    """Retries are bounded by REALTIME_NOTIFY_TIMEOUT, not attempts * answer."""
+    scanner = make_scanner("hci0", -50)
+    client = FakeClient()
+
+    started = time.monotonic()
+    with patch(NOTIFY_TIMEOUT, 0.2), patch(ANSWER_TIMEOUT, 5.0), patch(
+        READ_TIMEOUT, 2.0
+    ), patch(SETTLE_TIME, 0), patch(READ_ATTEMPTS, 3):
+        with patch(ESTABLISH) as establish_mock:
+            establish_mock.side_effect = establish({scanner.ble_device: client})
+            try:
+                await asyncio.wait_for(read([scanner]), timeout=1.0)
+            except BM6DeviceError:
+                pass
+            except TimeoutError:
+                pytest.fail("REALTIME_NOTIFY_TIMEOUT did not bound the attempts")
+            else:
+                pytest.fail("a silent device did not raise BM6DeviceError")
+
+    elapsed = time.monotonic() - started
+    assert elapsed < 0.8, f"the notify timeout did not bound the attempts ({elapsed:.2f}s)"
 
 
 async def test_failures_only_log_at_debug(caplog) -> None:
