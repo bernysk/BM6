@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 import logging
 from awesomeversion import AwesomeVersion
 
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.entity_component import EntityComponent
 from homeassistant.const import __version__ as HA_VERSION
 
@@ -33,6 +34,8 @@ class BM6Data:
 
 
 type BM6ConfigEntry = ConfigEntry[BM6Data]
+
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 _LOGGER = logging.getLogger(__name__)
 

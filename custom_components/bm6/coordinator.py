@@ -74,6 +74,9 @@ class BM6DataUpdateCoordinator(DataUpdateCoordinator):
             config_entry=config_entry,
             update_interval=self.configured_update_interval,
         )
+        # No successful read yet: avoid HA logging an initial miss as an error.
+        # The public coordinator refresh logs its first recovery at info.
+        self.last_update_success = False
 
     async def _async_update_data(self) -> dict:
         """Fetch data from the BM6 device."""
@@ -121,7 +124,10 @@ class BM6DataUpdateCoordinator(DataUpdateCoordinator):
                     data.Advertisement.Scanner if data.Advertisement else None
                 ),
             }
-            was_unreachable = self.consecutive_misses >= MISSES_BEFORE_UNREACHABLE
+            was_unreachable = (
+                self.consecutive_misses >= MISSES_BEFORE_UNREACHABLE
+                or (self.last_good_read is None and self.consecutive_misses > 0)
+            )
             self.last_good_read = dt_util.utcnow()
             self.consecutive_misses = 0
             self.update_interval = self.configured_update_interval
@@ -134,7 +140,12 @@ class BM6DataUpdateCoordinator(DataUpdateCoordinator):
                 "BM6 at %s read missed (%s): %s",
                 self.device_address, self.consecutive_misses, err,
             )
-            if self.consecutive_misses == MISSES_BEFORE_UNREACHABLE:
+            if self.last_good_read is None:
+                if self.consecutive_misses == 1:
+                    _LOGGER.warning(
+                        "BM6 at %s isn't reachable yet", self.device_address
+                    )
+            elif self.consecutive_misses == MISSES_BEFORE_UNREACHABLE:
                 _LOGGER.warning("BM6 at %s is unreachable", self.device_address)
             configured = self.configured_update_interval.total_seconds()
             ceiling = max(configured, MAX_BACKOFF_UPDATE_INTERVAL)
