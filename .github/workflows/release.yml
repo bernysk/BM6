@@ -4,6 +4,12 @@ on:
   release:
     types:
       - "published"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to rebuild, for example v1.0.8"
+        required: true
+        type: string
 
 jobs:
   release:
@@ -14,14 +20,33 @@ jobs:
       id-token: write
     env:
       BM6_ROOT_DIR: "${{ github.workspace }}/custom_components/bm6"
+      RELEASE_TAG: "${{ github.event.release.tag_name || inputs.tag }}"
     steps:
+      - name: "Validate the existing release tag"
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: "${{ github.token }}"
+        shell: bash
+        run: |
+          if ! git check-ref-format "refs/tags/${RELEASE_TAG}" ||
+             ! gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" --silent; then
+            echo "::error::The supplied tag does not exist or is invalid."
+            exit 1
+          fi
+          if ! gh release view --repo "${GITHUB_REPOSITORY}" -- "${RELEASE_TAG}" >/dev/null; then
+            echo "::error::The supplied tag must already have a GitHub release."
+            exit 1
+          fi
+
       - name: "Checkout the repository"
-        uses: "actions/checkout@v4.2.1"
+        uses: "actions/checkout@v7.0.1"
+        with:
+          ref: "refs/tags/${{ env.RELEASE_TAG }}"
 
       - name: "Adjust version number"
         shell: bash
-        run: |          
-          version="${{ github.event.release.tag_name }}"
+        run: |
+          version="${RELEASE_TAG}"
           version="${version,,}"
           version="${version#v}"
           # update const.py
@@ -38,11 +63,20 @@ jobs:
           zip bm6.zip -r ./
 
       - name: "Sign release package"
-        uses: sigstore/gh-action-sigstore-python@v3.0.0
+        uses: sigstore/gh-action-sigstore-python@v3.5.0
         with:
           inputs: "${{ env.BM6_ROOT_DIR }}/bm6.zip"
+          # On release events sigstore signs and uploads the ZIP, its bundle,
+          # and the source archives with their bundles; do not upload twice.
+          release-signing-artifacts: "${{ github.event_name == 'release' }}"
 
-      - name: "Upload the ZIP file to the release"
-        uses: softprops/action-gh-release@v2.2.1
+      - name: "Replace the ZIP and signature on the existing release"
+        if: github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v3.0.4
         with:
-          files: ${{ env.BM6_ROOT_DIR }}/bm6.zip
+          tag_name: "${{ env.RELEASE_TAG }}"
+          overwrite_files: true
+          fail_on_unmatched_files: true
+          files: |
+            ${{ env.BM6_ROOT_DIR }}/bm6.zip
+            ${{ env.BM6_ROOT_DIR }}/bm6.zip.sigstore.json
