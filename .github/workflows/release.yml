@@ -72,11 +72,19 @@ jobs:
 
       - name: "Replace the ZIP and signature on the existing release"
         if: github.event_name == 'workflow_dispatch'
-        uses: softprops/action-gh-release@v3.0.4
-        with:
-          tag_name: "${{ env.RELEASE_TAG }}"
-          overwrite_files: true
-          fail_on_unmatched_files: true
-          files: |
-            ${{ env.BM6_ROOT_DIR }}/bm6.zip
-            ${{ env.BM6_ROOT_DIR }}/bm6.zip.sigstore.json
+        env:
+          GH_TOKEN: "${{ github.token }}"
+        shell: bash
+        run: |
+          for file in "${BM6_ROOT_DIR}/bm6.zip" "${BM6_ROOT_DIR}/bm6.zip.sigstore.json"; do
+            if [[ ! -f "${file}" ]]; then
+              echo "::error::Required release asset is missing: ${file}"
+              exit 1
+            fi
+          done
+          # Upload assets directly to avoid PATCHing the release metadata,
+          # which can require workflow permissions for an older release tag.
+          gh release upload "${RELEASE_TAG}" \
+            "${BM6_ROOT_DIR}/bm6.zip" \
+            "${BM6_ROOT_DIR}/bm6.zip.sigstore.json" \
+            --clobber --repo "${GITHUB_REPOSITORY}"
