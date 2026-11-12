@@ -25,6 +25,9 @@ from .const import (
     BM6_READ_TIMEOUT,
     BM6_CLEANUP_TIMEOUT,
     CONNECT_MAX_ATTEMPTS,
+    CONNECT_SETTLE_TIME,
+    REALTIME_READ_ATTEMPTS,
+    REALTIME_ANSWER_TIMEOUT,
     GATT_DATA_REALTIME,
     GATT_NOTIFY_REALTIME_PREFIX,
     GATT_NOTIFY_VERSION_PREFIX,
@@ -126,6 +129,8 @@ class BM6Connector:
         self._address: str = address
         self._scanners: list[BluetoothScannerDevice] = None
         self._data: BM6Data = None
+        self._empty_answers = 0
+        self._last_empty_answer: str | None = None
         _LOGGER.debug("Get device BM6 at %s from HASS", self._address)
         self._scanners: list[BluetoothScannerDevice] = async_scanner_devices_by_address(
                 hass, 
@@ -167,6 +172,8 @@ class BM6Connector:
         if message.startswith(GATT_NOTIFY_REALTIME_PREFIX):
             real_time = BM6RealTimeData(message)
             if real_time.Voltage < MIN_PLAUSIBLE_VOLTAGE:
+                self._empty_answers += 1
+                self._last_empty_answer = message
                 _LOGGER.debug(
                     "Ignoring implausible real-time frame from BM6 at %s", self._address
                 )
@@ -215,6 +222,8 @@ class BM6Connector:
                 for scanner in self._scanners:
                     client = None
                     self._data = BM6Data(scanner.advertisement, scanner.scanner)
+                    self._empty_answers = 0
+                    self._last_empty_answer = None
                     try:
                         client = await establish_connection(
                             BleakClientWithServiceCache,
@@ -222,20 +231,48 @@ class BM6Connector:
                             self._address,
                             max_attempts=CONNECT_MAX_ATTEMPTS,
                         )
+                        await asyncio.sleep(CONNECT_SETTLE_TIME)
                         # Subscribe first so an immediate reply cannot be lost.
                         await client.start_notify(
                             CHARACTERISTIC_UUID_NOTIFY, self._notify_callback
                         )
                         async with asyncio.timeout(REALTIME_NOTIFY_TIMEOUT):
-                            await client.write_gatt_char(
-                                CHARACTERISTIC_UUID_WRITE,
-                                self._encrypt(bytearray.fromhex(GATT_DATA_REALTIME)),
-                                response=True,
-                            )
-                            while self._data.RealTime is None:
-                                if not client.is_connected:
-                                    raise BM6DeviceError("Disconnected while waiting for data")
-                                await asyncio.sleep(0.1)
+                            for attempt in range(1, REALTIME_READ_ATTEMPTS + 1):
+                                answered = self._empty_answers
+                                await client.write_gatt_char(
+                                    CHARACTERISTIC_UUID_WRITE,
+                                    self._encrypt(bytearray.fromhex(GATT_DATA_REALTIME)),
+                                    response=True,
+                                )
+                                try:
+                                    async with asyncio.timeout(REALTIME_ANSWER_TIMEOUT):
+                                        while (
+                                            self._data.RealTime is None
+                                            and self._empty_answers == answered
+                                        ):
+                                            if not client.is_connected:
+                                                raise BM6DeviceError(
+                                                    "Disconnected while waiting for data"
+                                                )
+                                            await asyncio.sleep(0.1)
+                                except TimeoutError:
+                                    pass
+                                if self._data.RealTime is not None:
+                                    break
+                                _LOGGER.debug(
+                                    "BM6 at %s had no reading after request %s",
+                                    self._address, attempt,
+                                )
+                            if self._data.RealTime is None:
+                                if self._last_empty_answer is not None:
+                                    raise BM6DeviceError(
+                                        f"BM6 at {self._address} answered without a reading "
+                                        f"{attempt} times, last answer was "
+                                        f"{self._last_empty_answer}"
+                                    )
+                                raise BM6DeviceError(
+                                    f"BM6 at {self._address} did not answer {attempt} requests"
+                                )
                         return self._data
                     except Exception as err:
                         errors.append(f"{scanner.scanner.name}: {type(err).__name__}: {err}")
