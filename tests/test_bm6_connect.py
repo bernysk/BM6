@@ -116,7 +116,7 @@ class FakeClient:
     def __init__(
         self,
         *frames: bytes,
-        answer_frames: list[bytes | None] | None = None,
+        answer_frames: list[bytes | None | tuple[float, bytes]] | None = None,
         log: list[tuple[str, float]] | None = None,
         delayed_frames: tuple[tuple[float, bytes], ...] = (),
         fail_start_notify: bool = False,
@@ -164,9 +164,16 @@ class FakeClient:
         if self.answer_frames is not None:
             index = len(self.writes) - 1
             if index < len(self.answer_frames):
-                frame = self.answer_frames[index]
-                if frame is not None:
-                    await self._deliver(frame)
+                answer = self.answer_frames[index]
+                if isinstance(answer, tuple):
+                    delay, frame = answer
+                    self._background.append(
+                        asyncio.get_running_loop().create_task(
+                            self._deliver_later(delay, frame)
+                        )
+                    )
+                elif answer is not None:
+                    await self._deliver(answer)
             return
         for frame in self.frames:
             await self._deliver(frame)
@@ -420,19 +427,24 @@ async def test_overall_deadline_cleans_up_connected_client() -> None:
     client = FakeClient()
 
     started = time.monotonic()
+    error = None
     with patch(READ_TIMEOUT, 0.2), patch(NOTIFY_TIMEOUT, 10), patch(SETTLE_TIME, 0):
         with patch(ESTABLISH) as establish_mock:
             establish_mock.side_effect = establish({scanner.ble_device: client})
             try:
                 await asyncio.wait_for(read([scanner]), timeout=2.0)
-            except BM6DeviceError:
-                pass
+            except BM6DeviceError as err:
+                error = err
             except TimeoutError:
                 pytest.fail("the overall deadline never fired (outer 2 s safety bound)")
             else:
                 pytest.fail("the overall deadline did not raise BM6DeviceError")
 
     elapsed = time.monotonic() - started
+    assert error is not None
+    assert "timed out after 0.2s" in str(error), (
+        f"the blocked read was not ended by the overall deadline: {error}"
+    )
     assert elapsed < 0.8, f"connected read was not bounded (took {elapsed:.2f}s)"
     names = call_names(client)
     assert "stop_notify" in names
@@ -577,51 +589,89 @@ async def test_empty_answer_then_real_answer_succeeds_on_same_scanner() -> None:
     assert len(client.writes) == 2
 
 
-async def test_only_empty_answers_report_the_last_answer() -> None:
-    """Every attempt empty fails with the request count and the last hex answer."""
+@pytest.mark.parametrize("attempts", [1, 2, 4])
+async def test_only_empty_answers_report_the_last_answer(attempts: int) -> None:
+    """Every attempt empty fails with the exact request count and last hex."""
     scanner = make_scanner("hci0", -50)
-    answers = [
-        realtime_frame(voltage=0.0),
-        realtime_frame(voltage=1.0),
-        realtime_frame(voltage=2.0),
-    ]
+    answers = [realtime_frame(voltage=float(index)) for index in range(attempts)]
     client = FakeClient(answer_frames=answers)
 
-    with patch(NOTIFY_TIMEOUT, 1.0), patch(ANSWER_TIMEOUT, 0.2), patch(
+    with patch(NOTIFY_TIMEOUT, 2.0), patch(ANSWER_TIMEOUT, 0.05), patch(
         SETTLE_TIME, 0
-    ), patch(READ_ATTEMPTS, 3):
+    ), patch(READ_ATTEMPTS, attempts):
         with patch(ESTABLISH) as establish_mock:
             establish_mock.side_effect = establish({scanner.ble_device: client})
             with pytest.raises(BM6DeviceError) as excinfo:
                 await read([scanner])
 
     assert establish_mock.call_count == 1
-    assert len(client.writes) == 3
-    message = str(excinfo.value).lower()
-    assert "answered without a reading" in message
-    assert answers[-1].hex() in message
-    assert "3" in message
+    assert len(client.writes) == attempts
+    expected = (
+        f"answered without a reading {attempts} times, "
+        f"last answer was {answers[-1].hex()}"
+    )
+    assert expected in str(excinfo.value).lower()
 
 
-async def test_no_answer_names_the_request_count() -> None:
-    """A silent device fails after REALTIME_READ_ATTEMPTS requests."""
+@pytest.mark.parametrize("attempts", [1, 2, 4])
+async def test_no_answer_names_the_request_count(attempts: int) -> None:
+    """A silent device fails with the exact number of requests it received."""
     scanner = make_scanner("hci0", -50)
     client = FakeClient()
 
-    with patch(NOTIFY_TIMEOUT, 1.0), patch(ANSWER_TIMEOUT, 0.05), patch(
+    with patch(NOTIFY_TIMEOUT, 2.0), patch(ANSWER_TIMEOUT, 0.05), patch(
         SETTLE_TIME, 0
-    ), patch(READ_ATTEMPTS, 3):
+    ), patch(READ_ATTEMPTS, attempts):
         with patch(ESTABLISH) as establish_mock:
             establish_mock.side_effect = establish({scanner.ble_device: client})
             with pytest.raises(BM6DeviceError) as excinfo:
                 await read([scanner])
 
     assert establish_mock.call_count == 1
-    assert len(client.writes) == 3
-    message = str(excinfo.value).lower()
-    assert "3" in message
-    assert "answer" in message
-    assert "request" in message
+    assert len(client.writes) == attempts
+    assert f"did not answer {attempts} requests" in str(excinfo.value).lower()
+
+
+async def test_delayed_plausible_answer_is_awaited() -> None:
+    """A plausible frame that arrives after the write is still read."""
+    scanner = make_scanner("hci0", -50)
+    client = FakeClient(
+        answer_frames=[(0.05, realtime_frame(voltage=13.2))],
+    )
+    try:
+        with patch(NOTIFY_TIMEOUT, 1.0), patch(ANSWER_TIMEOUT, 0.5), patch(
+            SETTLE_TIME, 0
+        ), patch(READ_ATTEMPTS, 3):
+            with patch(ESTABLISH) as establish_mock:
+                establish_mock.side_effect = establish({scanner.ble_device: client})
+                data, _ = await read([scanner])
+    finally:
+        await client.cancel_background()
+
+    assert establish_mock.call_count == 1
+    assert data.RealTime.Voltage == pytest.approx(13.2)
+    assert len(client.writes) == 1
+
+
+async def test_missing_first_answer_then_delayed_answer_succeeds() -> None:
+    """A silent first request is retried and a delayed second answer is read."""
+    scanner = make_scanner("hci0", -50)
+    client = FakeClient(
+        answer_frames=[None, (0.05, realtime_frame(voltage=13.2))],
+    )
+    try:
+        with patch(NOTIFY_TIMEOUT, 1.0), patch(ANSWER_TIMEOUT, 0.1), patch(
+            SETTLE_TIME, 0
+        ), patch(READ_ATTEMPTS, 3):
+            with patch(ESTABLISH) as establish_mock:
+                establish_mock.side_effect = establish({scanner.ble_device: client})
+                data, _ = await read([scanner])
+    finally:
+        await client.cancel_background()
+
+    assert establish_mock.call_count == 1
+    assert data.RealTime.Voltage == pytest.approx(13.2)
+    assert len(client.writes) == 2
 
 
 async def test_settle_happens_before_subscribe_and_subscribe_before_writes() -> None:

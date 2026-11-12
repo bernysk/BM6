@@ -149,6 +149,46 @@ async def test_non_bm6_devices_do_not_match(
     assert await make_flow()._is_valid_device(info) is False
 
 
+async def test_is_valid_device_uses_the_manifest_at_runtime() -> None:
+    """A synthetic matcher replaces the manifest, so the real matchers stop matching."""
+    flow = make_flow()
+    synthetic_manufacturer_id = 4242
+    synthetic_manufacturer_start = [9, 8, 7, 6]
+    synthetic_service_uuid = "0000ABCD-0000-1000-8000-00805F9B34FB"
+    synthetic_config = [
+        {
+            "connectable": True,
+            "manufacturer_id": synthetic_manufacturer_id,
+            "manufacturer_data_start": synthetic_manufacturer_start,
+        },
+        {"connectable": True, "service_uuid": synthetic_service_uuid},
+    ]
+
+    async def synthetic_bluetooth_config() -> list[dict]:
+        return synthetic_config
+
+    flow.bluetooth_config = synthetic_bluetooth_config
+
+    synthetic_manufacturer = make_service_info(
+        manufacturer_data={
+            synthetic_manufacturer_id: bytes(synthetic_manufacturer_start) + b"\x01"
+        }
+    )
+    assert await flow._is_valid_device(synthetic_manufacturer) is True
+
+    for advertised in (synthetic_service_uuid, synthetic_service_uuid.lower()):
+        uuid_info = make_service_info(service_uuids=(advertised,))
+        assert await flow._is_valid_device(uuid_info) is True
+
+    real_manufacturer = manufacturer_info(
+        FIRST_MANUFACTURER, FIRST_SIGNATURE + b"\x01"
+    )
+    assert await flow._is_valid_device(real_manufacturer) is False
+
+    real_uuid = make_service_info(service_uuids=(SERVICE_UUIDS[0],))
+    assert await flow._is_valid_device(real_uuid) is False
+
+
 async def test_get_devices_skips_configured_and_logs_nothing_at_info(
     hass: HomeAssistant, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -183,3 +223,15 @@ async def test_get_devices_skips_configured_and_logs_nothing_at_info(
         and record.levelno >= logging.INFO
     ]
     assert noisy == [], f"config_flow logged at info or above: {noisy}"
+
+    summaries = [
+        record
+        for record in caplog.records
+        if record.name.startswith(CONFIG_FLOW_LOGGER)
+        and record.levelno == logging.DEBUG
+        and (
+            "discovery scan" in record.getMessage().lower()
+            or "summary" in record.getMessage().lower()
+        )
+    ]
+    assert len(summaries) <= 1, f"more than one debug summary: {summaries}"
