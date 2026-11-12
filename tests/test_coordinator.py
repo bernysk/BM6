@@ -491,3 +491,61 @@ async def test_empty_reads_are_misses(hass: HomeAssistant, connector, bad_readin
     assert coordinator.consecutive_misses == 1
     assert coordinator.last_update_success is True
     assert coordinator.reachable is True
+
+
+async def test_startup_logging_without_data(
+    hass: HomeAssistant, connector, caplog
+) -> None:
+    """A failed startup refresh logs one warning and no error (SPEC 10)."""
+    connector.return_value.get_data.side_effect = BM6DeviceError("no device")
+
+    def addressed(records) -> list[logging.LogRecord]:
+        return [record for record in records if ADDRESS in record.getMessage()]
+
+    def warnings() -> list[logging.LogRecord]:
+        return [
+            record for record in addressed(caplog.records)
+            if record.levelno == logging.WARNING
+        ]
+
+    def errors() -> list[logging.LogRecord]:
+        return [
+            record for record in caplog.records if record.levelno >= logging.ERROR
+        ]
+
+    with caplog.at_level(logging.DEBUG):
+        caplog.clear()
+        entry = make_entry()
+        await async_setup_entry(hass, entry)
+        coordinator = entry.runtime_data.coordinator
+
+        assert coordinator.data is None
+        assert coordinator.last_good_read is None
+        assert errors() == [], f"startup failure logged an error: {errors()}"
+        assert len(warnings()) == 1, (
+            f"expected exactly one startup warning, got {warnings()}"
+        )
+        assert "reachable" in warnings()[0].getMessage().lower()
+
+        for _ in range(MISSES_BEFORE_UNREACHABLE + 2):
+            await refresh(hass, coordinator)
+            assert len(warnings()) == 1, (
+                f"a later miss repeated the startup warning: {warnings()}"
+            )
+            assert errors() == [], f"a later miss logged an error: {errors()}"
+        assert coordinator.consecutive_misses > MISSES_BEFORE_UNREACHABLE
+
+        succeed(connector, make_reading(voltage=VOLTAGE))
+        await refresh(hass, coordinator)
+
+        infos = [
+            record
+            for record in caplog.records
+            if record.name == "custom_components.bm6.coordinator"
+            and record.levelno == logging.INFO
+            and ADDRESS in record.getMessage()
+        ]
+        assert len(infos) == 1, f"expected one reachable-again info, got {infos}"
+        assert "reachable again" in infos[0].getMessage().lower()
+        assert len(warnings()) == 1
+        assert errors() == []
