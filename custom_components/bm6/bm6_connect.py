@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import logging
 from enum import Enum
 from typing import Optional
-from bleak import BleakClient
+from bleak_retry_connector import BleakClientWithServiceCache, establish_connection
 from bleak.backends.characteristic import BleakGATTCharacteristic
 from bleak.backends.scanner import AdvertisementData
 from Crypto.Cipher import AES
@@ -22,9 +22,10 @@ from .const import (
     CRYPT_KEY,
     MIN_PLAUSIBLE_VOLTAGE,
     REALTIME_NOTIFY_TIMEOUT,
-    BLEAK_CLIENT_TIMEOUT,
+    BM6_READ_TIMEOUT,
+    BM6_CLEANUP_TIMEOUT,
+    CONNECT_MAX_ATTEMPTS,
     GATT_DATA_REALTIME,
-    GATT_DATA_VERSION,
     GATT_NOTIFY_REALTIME_PREFIX,
     GATT_NOTIFY_VERSION_PREFIX,
 )
@@ -184,67 +185,71 @@ class BM6Connector:
                 self._data.Firmware,
             )
 
-    async def get_data(self) -> BM6Data:
-        """Retrieve data from the BM6 device."""
-        exceptions: list[Exception] = []
-        for scanner in self._scanners:
-            _LOGGER.debug("Start getting data from the BM6 at %s via scanner %s", 
-                          self._address,
-                          scanner.scanner.name)
+    async def _cleanup(self, client: BleakClientWithServiceCache) -> None:
+        """Release the connection even if stopping notifications fails or hangs."""
+        cancellation = None
+        for step, call in (
+            ("stop_notify", lambda: client.stop_notify(CHARACTERISTIC_UUID_NOTIFY)),
+            ("disconnect", client.disconnect),
+        ):
             try:
-                self._data = BM6Data(
-                    scanner.advertisement, 
-                    scanner.scanner
+                async with asyncio.timeout(BM6_CLEANUP_TIMEOUT):
+                    await call()
+            except asyncio.CancelledError as err:
+                # The overall deadline can expire during stop_notify. Still
+                # release the connection before propagating cancellation.
+                cancellation = err
+            except Exception as err:
+                _LOGGER.debug(
+                    "Error during %s of BM6 at %s: %s", step, self._address, err
                 )
-                async with BleakClient(
-                    scanner.ble_device, 
-                    timeout=BLEAK_CLIENT_TIMEOUT
-                ) as client:
-                    _LOGGER.debug(
-                        "Write to BM6 at %s characteristic %s",
-                        self._address,
-                        CHARACTERISTIC_UUID_WRITE,
-                    )
-                    await client.write_gatt_char(
-                        CHARACTERISTIC_UUID_WRITE,
-                        self._encrypt(bytearray.fromhex(GATT_DATA_REALTIME)),
-                        response=True,
-                    )
-                    _LOGGER.debug("Wait for data from BM6 at %s", self._address)
-                    self._data.RealTime = None
-                    await client.start_notify(
-                        CHARACTERISTIC_UUID_NOTIFY, self._notify_callback
-                    )
-                    async with asyncio.timeout(REALTIME_NOTIFY_TIMEOUT):
-                        while self._data is None or self._data.RealTime is None:
-                            await asyncio.sleep(0.5)
-                    _LOGGER.debug("Finishing wait for data from BM6 at %s", self._address)
-                    await client.stop_notify(CHARACTERISTIC_UUID_NOTIFY)
 
-                    # The following code is commented out but can be used to get firmware version data
-                    # _LOGGER.debug("Write to BM6 at %s characteristic %s", device.address, CHARACTERISTIC_UUID_WRITE)
-                    # await client.write_gatt_char(CHARACTERISTIC_UUID_WRITE,
-                    #                              self._encrypt(bytearray.fromhex(GATT_DATA_VERSION)),
-                    #                              response=True)
-                    # _LOGGER.debug("Wait for data from BM6 at %s", device.address)
-                    # self._data.Firmware = None
-                    # await client.start_notify(CHARACTERISTIC_UUID_NOTIFY,
-                    #                           self._notify_callback)
-                    # while self._data is None or self._data.Firmware is None:
-                    #     await asyncio.sleep(0.5)
-                    # _LOGGER.debug("Finishing wait for data from BM6 at %s", device.address)
-                    # await client.stop_notify(CHARACTERISTIC_UUID_NOTIFY)
-            except Exception as e:
-                e.add_note = f"Using scanner {scanner.scanner.name}"
-                exceptions.append(e)
-                _LOGGER.warning("Error while reading BM6 at %s: %s", self._address, e)
-            if not self._data.RealTime:
-                if len(exceptions) > 0:
-                    raise BM6DeviceError(
-                        f"Error while reading BM6 at {self._address}: {exceptions}"
-                    ) from exceptions[0]
-                else:
-                    raise BM6DeviceError(
-                        f"Error while reading BM6 at {self._address}"
-                    )
-        return self._data if self._data else None
+        if cancellation is not None:
+            raise cancellation
+
+    async def get_data(self) -> BM6Data:
+        """Read through the available scanners within one overall deadline."""
+        errors: list[str] = []
+        try:
+            async with asyncio.timeout(BM6_READ_TIMEOUT):
+                for scanner in self._scanners:
+                    client = None
+                    self._data = BM6Data(scanner.advertisement, scanner.scanner)
+                    try:
+                        client = await establish_connection(
+                            BleakClientWithServiceCache,
+                            scanner.ble_device,
+                            self._address,
+                            max_attempts=CONNECT_MAX_ATTEMPTS,
+                        )
+                        # Subscribe first so an immediate reply cannot be lost.
+                        await client.start_notify(
+                            CHARACTERISTIC_UUID_NOTIFY, self._notify_callback
+                        )
+                        async with asyncio.timeout(REALTIME_NOTIFY_TIMEOUT):
+                            await client.write_gatt_char(
+                                CHARACTERISTIC_UUID_WRITE,
+                                self._encrypt(bytearray.fromhex(GATT_DATA_REALTIME)),
+                                response=True,
+                            )
+                            while self._data.RealTime is None:
+                                if not client.is_connected:
+                                    raise BM6DeviceError("Disconnected while waiting for data")
+                                await asyncio.sleep(0.1)
+                        return self._data
+                    except Exception as err:
+                        errors.append(f"{scanner.scanner.name}: {type(err).__name__}: {err}")
+                        _LOGGER.debug(
+                            "Error while reading BM6 at %s via scanner %s: %s",
+                            self._address, scanner.scanner.name, err,
+                        )
+                    finally:
+                        if client is not None:
+                            await self._cleanup(client)
+        except TimeoutError as err:
+            raise BM6DeviceError(
+                f"Read of BM6 at {self._address} timed out after {BM6_READ_TIMEOUT}s"
+            ) from err
+        raise BM6DeviceError(
+            f"Error while reading BM6 at {self._address}: {'; '.join(errors)}"
+        )

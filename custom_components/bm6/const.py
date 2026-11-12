@@ -6,7 +6,7 @@ from homeassistant.const import Platform, UnitOfTemperature
 
 NAME = "Battery Monitor BM6"
 DOMAIN = "bm6"
-VERSION = "1.0.3"
+VERSION = "1.1.0"
 MIN_REQUIRED_HA_VERSION = "2025.1.1"
 
 COMPONENT = "component"
@@ -31,8 +31,10 @@ GATT_NOTIFY_VERSION_PREFIX = "d15501"
 CRYPT_KEY = bytearray(
     [108, 101, 97, 103, 101, 110, 100, 255, 254, 48, 49, 48, 48, 48, 48, 57]
 )
-# Timeout for the Bleak client
-BLEAK_CLIENT_TIMEOUT = 10  # Timeout
+# Connection retries and bounded read / cleanup windows (seconds).
+CONNECT_MAX_ATTEMPTS = 3
+BM6_READ_TIMEOUT = 120
+BM6_CLEANUP_TIMEOUT = 5
 
 # Configuration keys
 CONF_DEVICE_ADDRESS = "device_address"
