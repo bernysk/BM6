@@ -188,3 +188,77 @@ Required English names (HA wording):
   for a fixed address.
 
 Command that must pass: `.venv/bin/pytest` from the worktree root.
+
+---
+
+# Round 2: BLE connection, manifest, startup log
+
+Everything above still holds (unique_ids, last-known-state behaviour, tests).
+
+## 8. `bm6_connect.py` contract
+
+Module-level names the tests patch (import them by name into `bm6_connect`):
+
+- `async_scanner_devices_by_address` (from `homeassistant.components.bluetooth`, as today)
+- `establish_connection` and `BleakClientWithServiceCache` (from `bleak_retry_connector`)
+
+New/changed constants in `const.py` (also imported by name into `bm6_connect`):
+
+```python
+VERSION = "1.1.0"
+BM6_READ_TIMEOUT = 120         # s, one overall limit for a whole get_data() across all scanners
+CONNECT_MAX_ATTEMPTS = 3       # passed to establish_connection(max_attempts=...)
+REALTIME_NOTIFY_TIMEOUT = 10   # s, wait for a plausible real-time frame per scanner (exists)
+BM6_CLEANUP_TIMEOUT = 5        # s, each of stop_notify / disconnect
+```
+
+`BM6Connector(hass=..., address=...)` keeps its constructor: it gets the scanners
+with `async_scanner_devices_by_address(hass, address, connectable=True)`, raises
+`BM6DeviceError` if there are none, and sorts them by `advertisement.rssi`,
+strongest first.
+
+`await connector.get_data() -> BM6Data`:
+
+1. The whole call runs under `asyncio.timeout(BM6_READ_TIMEOUT)`. On expiry it
+   raises `BM6DeviceError` (not `TimeoutError`), and the open client is cleaned up.
+2. For each scanner in RSSI order:
+   1. `client = await establish_connection(BleakClientWithServiceCache, scanner.ble_device, address, max_attempts=CONNECT_MAX_ATTEMPTS)`
+   2. `await client.start_notify(CHARACTERISTIC_UUID_NOTIFY, callback)` **before**
+      the first `await client.write_gatt_char(CHARACTERISTIC_UUID_WRITE, <encrypted GATT_DATA_REALTIME>, response=True)`.
+   3. Wait up to `REALTIME_NOTIFY_TIMEOUT` for a plausible frame (implausible
+      frames < `MIN_PLAUSIBLE_VOLTAGE` are ignored, as now). The request may be
+      written once more inside that window if no plausible frame came (Zwer2k).
+   4. Always clean up: `stop_notify` and `disconnect`, each bounded by
+      `BM6_CLEANUP_TIMEOUT`, errors swallowed (debug log).
+   5. On a plausible frame return `BM6Data` whose `Advertisement` is from **this**
+      scanner. On any failure, log at **debug** and try the next scanner.
+3. Only when every scanner failed: raise `BM6DeviceError` naming each scanner's error.
+4. `bm6_connect.py` logs nothing above debug (the coordinator owns user-facing logs).
+
+A test client fake needs: `start_notify(uuid, cb)`, `write_gatt_char(uuid, data, response=True)`,
+`stop_notify(uuid)`, `disconnect()`, `is_connected`. Frames are AES-CBC encrypted
+with `CRYPT_KEY` and a zero IV; a decrypted real-time frame is hex starting with
+`d15507`; voltage is `int(hex[14:18], 16) / 100`.
+
+## 9. `manifest.json`
+
+- `"version": "1.1.0"` (same as `const.VERSION`).
+- `"requirements"`: `pycryptodome` and `bleak-retry-connector` with lower bounds
+  every supported HA (`MIN_REQUIRED_HA_VERSION` up to current) already satisfies;
+  no `==` pins that could clash with HA's package constraints.
+- `"bluetooth"`: keep the four `manufacturer_id` matchers and the
+  `0000fff0-...` service_uuid matcher; remove the `00001800`, `00001801` and
+  `0000180a` service_uuid matchers.
+- `"documentation": "https://github.com/bernysk/BM6"`,
+  `"issue_tracker": "https://github.com/bernysk/BM6/issues"`,
+  `"codeowners": ["@bernysk"]`.
+
+## 10. Startup log
+
+When the first refresh fails and there is no data yet: **no ERROR record from any
+logger** (including HA's DataUpdateCoordinator "Error fetching ..."), and exactly
+**one WARNING** that the BM6 at <address> isn't reachable yet. That warning counts
+as this outage's unreachable warning: no second warning when the misses reach
+`MISSES_BEFORE_UNREACHABLE`. After a later success, the "reachable again" info
+log applies as before. Don't call private HA methods (`_async_refresh` etc.).
+Entities behave as before (sensors unavailable unless restored, Reachable off).
